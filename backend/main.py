@@ -1,0 +1,107 @@
+## install line of code: pip install -r requirements.txt
+# uvicorn main:app --reload to run the server
+# server is live on localhost:8000
+
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
+
+### Actual function imported from other files
+from models import indicTrans2
+from models import Qwen
+from services.pipeline import pipeline_message
+from services.scheduler import start_database_sync, unschedule_reminder
+from services.connectToMongoDB import (
+    get_reminders,
+    delete_reminder,
+)
+
+app = FastAPI()
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:5173"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+@app.on_event("startup")
+async def startup():
+    print("Loading IndicTrans2...")
+    indicTrans2.load_model()
+    print("IndicTrans2 loaded.")
+    print("Loading Qwen...")
+    Qwen.load_model()
+    print("Qwen loaded.")
+    # Build reminder jobs from MongoDB and keep them in sync
+    start_database_sync()
+    print("All models loaded...")
+
+@app.get("/")
+def home():
+    return {"message": "MedVoice backend is running on localhost:8000"}
+
+class ReminderData(BaseModel):
+    message: str
+    language: str = "hi-IN"  # speech language chosen in the app
+
+@app.get("/reminders")
+def get_all_reminders():
+    reminders = get_reminders()
+
+    return {
+        "success": True,
+        "reminders": reminders
+    }
+
+@app.post("/sendData")
+def receive_reminder(data: ReminderData):
+    print(f"Reminder received ({data.language}):", data.message)
+    result = pipeline_message(data.message, data.language)
+    return {
+        "success": result["success"],
+        "message": result["message"],
+        "received_text": data.message,
+        "result": result
+    }
+
+@app.delete("/reminders/{reminder_id}")
+def remove_reminder(reminder_id: str):
+
+    # Get all reminders from MongoDB
+    reminders = get_reminders()
+
+    # Find the requested reminder
+    reminder = next(
+        (
+            r for r in reminders
+            if r["_id"] == reminder_id
+        ),
+        None
+    )
+
+    # Reminder does not exist
+    if reminder is None:
+        return {
+            "success": False,
+            "message": "Reminder not found"
+        }
+
+    # Remove this reminder's scheduler jobs
+    unschedule_reminder(reminder_id)
+
+    # Delete reminder from MongoDB
+    deleted = delete_reminder(reminder_id)
+
+    if deleted:
+
+        return {
+            "success": True,
+            "message": "Reminder and scheduled jobs deleted"
+        }
+
+    return {
+        "success": False,
+        "message": "Could not delete reminder"
+    }
